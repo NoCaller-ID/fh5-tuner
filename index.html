@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0a0608">
+<title>FH5 Universal Tuner</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Outfit:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+:root{--ff:'Outfit',sans-serif;--fm:'Space Mono',monospace}
+body{background:#0a0608;color:#f0e6ec;font-family:var(--fm);min-height:100vh;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:26px;height:26px;background:linear-gradient(135deg,#ff2d8a,#d4a857);border-radius:50%;border:3px solid #fff;box-shadow:0 0 14px #ff2d8a88;cursor:pointer}
+input[type=range]::-moz-range-thumb{width:26px;height:26px;background:linear-gradient(135deg,#ff2d8a,#d4a857);border-radius:50%;border:3px solid #fff;cursor:pointer}
+::selection{background:#ff2d8a44}
+.badge{display:inline-block;font-size:8px;font-family:var(--ff);letter-spacing:1px;padding:1px 5px;border-radius:3px;margin-left:6px;vertical-align:middle;font-weight:700;text-transform:uppercase}
+.badge-tested{background:#003322;color:#44cc66;border:1px solid #44cc66}
+.badge-theory{background:#1a1200;color:#d4a857;border:1px solid #d4a857}
+.badge-fh5{background:#001a2a;color:#4488ff;border:1px solid #4488ff}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script>
+const{useState,useMemo,useRef,useEffect,useCallback}=React;
+const h=React.createElement;
+
+const DRIVETRAINS=["RWD","FWD","AWD"],ENGINE_POS=["Front","Mid","Rear"],TIRES=["Street","Sport","Race","Slicks"],GEAR_COUNTS=[4,5,6,7,8],TIRE_K=0.0744;
+const GEAR_RANGES={1:[2,5],2:[1.5,3.5],3:[1,2.5],4:[0.8,2],5:[0.6,1.5],6:[0.5,1.2],7:[0.5,1],8:[0.5,0.9],FD:[2,6]};
+const C={bg:"#0a0608",card:"#120d10",border:"#2a1f26",pink:"#ff2d8a",gold:"#d4a857",hotPink:"#ff69b4",neon:"#ff44aa",purple:"#9b30ff",chrome:"#c0c0c0",dim:"#5a4050",dimmer:"#3a2a32",text:"#f0e6ec",sub:"#7a6070",hp:"#ff2d8a",tq:"#d4a857",green:"#44cc66",red:"#ff4444",blue:"#4488ff"};
+const GP={pink:"linear-gradient(135deg,#ff2d8a,#ff69b4,#d4a857)",flat:"linear-gradient(135deg,#ff2d8a,#ff44aa)",gold:"linear-gradient(135deg,#d4a857,#f0d48a)",neon:"linear-gradient(90deg,#ff2d8a,#9b30ff)",blue:"linear-gradient(135deg,#4488ff,#2266cc)"};
+
+function clamp(v,lo,hi){return Math.min(hi,Math.max(lo,v))}
+function pct(v){return Math.round(v*100)}
+function fmt(v){return Math.round(v*10)/10}
+function fmtG(v){return Math.round(v*100)/100}
+function calcVal(mn,mx,p){return mn+(mx-mn)*p}
+function twMod(w){return(w-245)/245}
+// Snap to nearest 0.5 PSI (FH5 only adjusts in 0.5 increments)
+function snap5(v){return Math.round(v*2)/2}
+
+// ─── V9: Archetype-aware camber & pressure ────────────────────────────────
+const HIGH_PTW=0.28;
+
+function getArchetype(enginePos,drivetrain,ptw){
+  const tier=ptw>=HIGH_PTW?"high":"low";
+  const key=enginePos+"_"+drivetrain+"_"+tier;
+  const map={
+    "Front_RWD_high":{camberF:-1.2,camberR:-1.3,pressF:24.0,pressR:25.0,conf:"tested"},
+    "Front_AWD_low": {camberF:-1.2,camberR:-1.0,pressF:26.5,pressR:26.5,conf:"tested"},
+    "Mid_RWD_high":  {camberF:-1.5,camberR:-1.3,pressF:23.0,pressR:23.0,conf:"tested"},
+    "Mid_RWD_low":   {camberF:-1.2,camberR:-1.0,pressF:27.5,pressR:27.5,conf:"tested"},
+    "Front_RWD_low": {camberF:-1.2,camberR:-1.1,pressF:25.5,pressR:26.0,conf:"theory"},
+    "Front_AWD_high":{camberF:-1.3,camberR:-1.1,pressF:26.0,pressR:26.0,conf:"theory"},
+    "Front_FWD_high":{camberF:-1.4,camberR:-0.8,pressF:25.0,pressR:27.0,conf:"theory"},
+    "Front_FWD_low": {camberF:-1.2,camberR:-0.8,pressF:26.0,pressR:27.0,conf:"theory"},
+    "Mid_AWD_high":  {camberF:-1.4,camberR:-1.2,pressF:24.0,pressR:24.0,conf:"theory"},
+    "Mid_AWD_low":   {camberF:-1.2,camberR:-1.0,pressF:26.5,pressR:26.5,conf:"theory"},
+    "Mid_FWD_high":  {camberF:-1.5,camberR:-0.8,pressF:24.0,pressR:26.0,conf:"theory"},
+    "Mid_FWD_low":   {camberF:-1.3,camberR:-0.8,pressF:26.0,pressR:27.0,conf:"theory"},
+    "Rear_RWD_high": {camberF:-1.3,camberR:-1.4,pressF:24.0,pressR:23.5,conf:"theory"},
+    "Rear_RWD_low":  {camberF:-1.1,camberR:-1.2,pressF:26.5,pressR:26.0,conf:"theory"},
+    "Rear_AWD_high": {camberF:-1.3,camberR:-1.3,pressF:24.0,pressR:24.0,conf:"theory"},
+    "Rear_AWD_low":  {camberF:-1.1,camberR:-1.1,pressF:26.5,pressR:26.5,conf:"theory"},
+    "Rear_FWD_high": {camberF:-1.4,camberR:-0.8,pressF:24.5,pressR:26.5,conf:"theory"},
+    "Rear_FWD_low":  {camberF:-1.2,camberR:-0.8,pressF:26.0,pressR:27.0,conf:"theory"},
+  };
+  return map[key]||{camberF:-1.2,camberR:-1.1,pressF:26.0,pressR:26.5,conf:"theory"};
+}
+
+function scaleCamberForCompound(base,tc){
+  if(tc==="Slicks")return base;
+  if(tc==="Race")return base-0.1;
+  if(tc==="Sport")return base-0.2;
+  return base-0.3;
+}
+function scalePressureForCompound(base,tc){
+  if(tc==="Slicks")return base;
+  if(tc==="Race")return base+0.5;
+  if(tc==="Sport")return base+2.0;
+  return base+3.5;
+}
+
+function calcChassis(inp,eOff,xOff){
+  const{weightFront:wF,hp,weightLbs,drivetrain:dt,enginePos:ep,tireCompound:tc,hasAero,tireWidthF,tireWidthR,isController}=inp;
+  const wR=100-wF,hpw=hp/Math.max(weightLbs,1),twF=twMod(tireWidthF||245),twR=twMod(tireWidthR||275),ctrl=isController?1:0;
+  const tSt={Street:0,Sport:.03,Race:.05,Slicks:.07},tAR={Street:0,Sport:.04,Race:.07,Slicks:.10};
+  const tDM={Street:0,Sport:.02,Race:.04,Slicks:.06};
+  let pm=hpw>=.35?.05:hpw>=.2?.03:.01;
+  let fS=wF/100+tSt[tc]+twF*.03,rS=wR/100+tSt[tc]+twR*.03;
+  if(dt==="RWD")rS+=pm;else if(dt==="FWD")fS+=pm;else{fS+=pm*.4;rS+=pm*.6}
+  if(!hasAero){fS+=.02;rS+=.02}
+  fS-=eOff*.005;rS+=xOff*.005;fS-=ctrl*.03;rS-=ctrl*.015;
+  fS=clamp(fS,.15,.85);rS=clamp(rS,.15,.85);
+  let fA=wF/100+.03+tAR[tc]+twF*.02,rA=wR/100+.03+tAR[tc]+twR*.02;
+  if(dt==="RWD")rA+=.02;else if(dt==="FWD")fA+=.02;
+  if(!hasAero){fA+=.03;rA+=.03}
+  fA-=eOff*.008;rA+=xOff*.008;fA-=ctrl*.04;rA-=ctrl*.02;
+  fA=clamp(fA,.15,.9);rA=clamp(rA,.15,.9);
+  const db=.55+tDM[tc]-ctrl*.04;
+  let rbF=clamp(db+(wF-50)*.003,.4,.8),rbR=clamp(db+(wR-50)*.003,.4,.8);
+  rbF-=eOff*.004;rbR+=xOff*.004;rbF=clamp(rbF,.4,.8);rbR=clamp(rbR,.4,.8);
+  const bpF=clamp(rbF*.55,.2,.55),bpR=clamp(rbR*.55,.2,.55);
+  let toeF=0,toeR=0;
+  if(dt==="RWD")toeR=.1;else if(dt==="FWD")toeF=-.1;else toeR=.1;
+  toeF-=eOff*.02;toeR+=ctrl*.05;toeF=fmt(clamp(toeF,-.5,.5));toeR=fmt(clamp(toeR,-.2,.5));
+  const casterB=ep==="Rear"?6:ep==="Mid"?5.8:5.5,caster=fmt(casterB+ctrl*.5);
+
+  const ptw=hp/Math.max(weightLbs,1);
+  const arch=getArchetype(ep,dt,ptw);
+  const camF=fmt(scaleCamberForCompound(arch.camberF,tc));
+  const camR=fmt(scaleCamberForCompound(arch.camberR,tc));
+  // V9.1: snap pressure to 0.5 PSI increments (FH5 constraint)
+  const pressF=snap5(scalePressureForCompound(arch.pressF,tc));
+  const pressR=snap5(scalePressureForCompound(arch.pressR,tc));
+  const pressConf=arch.conf;
+  const camberConf=(tc==="Slicks")?arch.conf:"theory";
+
+  let bb=clamp(Math.round(wF+2-eOff*.5),48,60);
+  const bp2=tc==="Slicks"?97:tc==="Race"?98:100;
+  const pl=hpw>=.35?"high":hpw>=.2?"mid":"low";
+  let diff={};
+  if(dt==="RWD"){let a={low:55,mid:45,high:38}[pl],d2={low:15,mid:12,high:10}[pl];if(ep==="Mid"){a-=3;d2-=2}if(ep==="Rear"){a-=5;d2-=3}if(tc==="Slicks")a-=5;if(tc==="Race")a-=2;a+=Math.round(twR*5);a-=Math.round(xOff*.6);d2-=Math.round(xOff*.2);a-=ctrl*5;d2-=ctrl*2;diff={rearAccel:clamp(a,20,70),rearDecel:clamp(d2,5,25)}}
+  else if(dt==="FWD"){let fa={low:35,mid:30,high:25}[pl]-ctrl*3;diff={frontAccel:clamp(fa,15,45),frontDecel:8}}
+  else{const ra2={low:50,mid:42,high:35}[pl]-(tc==="Slicks"?5:0)-ctrl*4,fa2={low:30,mid:25,high:20}[pl]-(tc==="Slicks"?3:0)-ctrl*2;diff={center:wR>=55?70:wR>=50?65:60,frontAccel:clamp(fa2,15,45),frontDecel:8,rearAccel:clamp(ra2-Math.round(xOff*.6),25,65),rearDecel:12}}
+  let aero=null;
+  if(hasAero){if(dt==="RWD")aero={f:"40-45%",r:"55-65%"};else if(dt==="FWD")aero={f:"55-60%",r:"35-45%"};else aero={f:"45-50%",r:"50-55%"}}
+  return{springs:{fPct:fS,rPct:rS},arb:{fPct:fA,rPct:rA},damp:{rbF,rbR,bpF,bpR},ride:{f:hasAero?.3:.15,r:hasAero?.35:.18},align:{camF,camR,toeF,toeR,caster,camberConf},diff,brakes:{balance:bb,pressure:bp2},pressF,pressR,pressConf,aero,meta:{hpw:Math.round(hpw*1000)/1000,pl,wR,arch,ptw}}
+}
+
+function calcGearing(dyno,nG,tgtSpd,dt){
+  const{peakHpRpm,peakTqRpm,redline,powerClimb,powerFalloff}=dyno;
+  if(!redline||!peakHpRpm||!peakTqRpm||!tgtSpd)return null;
+  const pbLow=powerClimb||Math.max(peakTqRpm*.85,redline*.3),pbHigh=powerFalloff||Math.min(peakHpRpm+500,redline);
+  const shiftRpm=clamp(Math.round(pbHigh),pbLow+500,redline-100);
+  const sp=(redline*TIRE_K)/tgtSpd;
+  let fg=({RWD:3.2,FWD:3,AWD:2.8})[dt]||3,tTG=.8,fd=sp/tTG;
+  if(fd>6){fd=6;tTG=sp/fd}else if(fd<2){fd=2;tTG=sp/fd}
+  tTG=clamp(tTG,.5,2.5);
+  let K=Math.pow(tTG/fg,1/(nG-1));
+  if(K<.6){fg=clamp(tTG/Math.pow(.6,nG-1),1.5,5);K=Math.pow(tTG/fg,1/(nG-1))}
+  else if(K>.92){fg=clamp(tTG/Math.pow(.92,nG-1),1.5,5);K=Math.pow(tTG/fg,1/(nG-1))}
+  const ratios=[];for(let i=0;i<nG;i++)ratios.push(fmtG(fg*Math.pow(K,i)));
+  const aT=ratios[ratios.length-1];fd=fmtG(clamp((redline*TIRE_K)/(tgtSpd*aT),2,6));
+  const sPs=ratios.slice(0,-1).map((r,i)=>({gear:i+1,shiftAt:shiftRpm,dropTo:Math.round(shiftRpm*(ratios[i+1]/r))}));
+  const lRpm=Math.round(peakTqRpm*({RWD:.65,FWD:.8,AWD:.85}[dt]||.7));
+  const cTS=Math.round((redline*TIRE_K)/(aT*fd));
+  return{ratios,finalDrive:fd,shiftPoints:sPs,shiftPoint:shiftRpm,launchRpm:lRpm,pbLow:Math.round(pbLow),pbHigh:Math.round(pbHigh),K:fmtG(K),calcTopSpeed:cTS}
+}
+
+function loadTunes(){try{return JSON.parse(localStorage.getItem("fh5-tunes"))||[]}catch{return[]}}
+function saveTunes(t){try{localStorage.setItem("fh5-tunes",JSON.stringify(t.slice(0,50)))}catch(e){console.error(e)}}
+
+// ─── Components ───
+const sty={card:{background:C.card,border:"1px solid "+C.border,borderRadius:14,padding:16,maxWidth:540,margin:"0 auto 16px",boxShadow:"0 4px 30px "+C.pink+"08"},
+statBox:{background:"#0e080b",borderRadius:8,padding:10,textAlign:"center"},
+statLbl:{fontSize:9,color:C.dim,letterSpacing:2,textTransform:"uppercase",marginBottom:4,fontFamily:"var(--ff)"},
+secHdr:{fontSize:10,fontWeight:600,letterSpacing:4,textTransform:"uppercase",background:GP.pink,WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",marginBottom:10,paddingBottom:8,borderBottom:"1px solid "+C.dimmer,fontFamily:"var(--ff)"},
+lbl:{display:"block",fontSize:9,color:C.dim,letterSpacing:2,textTransform:"uppercase",marginBottom:3,fontFamily:"var(--ff)"},
+numIn:{width:"100%",padding:"8px",background:"#0e080b",border:"1px solid "+C.dimmer,borderRadius:6,color:C.gold,fontSize:15,fontWeight:700,fontFamily:"var(--fm)",outline:"none",boxSizing:"border-box",textAlign:"center"},
+txtIn:{width:"100%",padding:"8px 10px",background:"#0e080b",border:"1px solid "+C.dimmer,borderRadius:6,color:C.text,fontSize:14,fontWeight:600,fontFamily:"var(--ff)",outline:"none",boxSizing:"border-box"}};
+
+function Sec({title,icon,children}){return h("div",{style:{marginBottom:22}},h("div",{style:sty.secHdr},icon+" "+title),children)}
+function Row({label,value,sub,extra,badge}){
+  return h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid "+C.dimmer+"11"}},
+    h("span",{style:{color:C.sub,fontSize:12,fontFamily:"var(--ff)"}},label,badge&&h("span",{className:"badge badge-"+badge},badge)),
+    h("div",{style:{display:"flex",alignItems:"center",gap:8}},extra,
+      h("div",{style:{textAlign:"right"}},h("span",{style:{color:C.text,fontSize:14,fontWeight:600,fontFamily:"var(--fm)"}},value),sub&&h("div",{style:{fontSize:9,color:C.dim}},sub))))}
+
+function NumIn({label,value,onChange,min:mn=0,max:mx=99999,w}){
+  const[d,setD]=useState(String(value)),foc=useRef(false),lc=useRef(value);
+  useEffect(()=>{if(!foc.current&&value!==lc.current){setD(String(value));lc.current=value}},[value]);
+  const commit=r=>{const n=parseFloat(r);if(!isNaN(n)){const c=clamp(n,mn,mx);setD(String(c));lc.current=c;onChange(c)}else setD(String(lc.current))};
+  return h("div",{style:{width:w||"100%",minWidth:0}},label&&h("label",{style:sty.lbl},label),h("input",{type:"text",inputMode:"decimal",value:d,onChange:e=>setD(e.target.value),onFocus:()=>{foc.current=true},onBlur:e=>{foc.current=false;commit(e.target.value)},onKeyDown:e=>{if(e.key==="Enter")e.target.blur()},style:{...sty.numIn,width:w||"100%"}}))}
+
+function TxtIn({label,value,onChange,placeholder}){
+  return h("div",{style:{width:"100%"}},label&&h("label",{style:sty.lbl},label),h("input",{type:"text",value:value,onChange:e=>onChange(e.target.value),placeholder:placeholder||"",style:sty.txtIn}))}
+
+function Pill({label,active,onClick,color}){
+  return h("button",{onClick,style:{padding:"7px 14px",borderRadius:20,border:active?"none":"1px solid "+C.dimmer,cursor:"pointer",fontSize:12,fontWeight:active?700:400,fontFamily:"var(--ff)",background:active?(color||GP.flat):"transparent",color:active?"#fff":C.dim,transition:"all 0.2s",boxShadow:active?"0 0 14px "+C.pink+"33":"none"}},label)}
+
+function Toggle({label,value,onChange}){
+  return h("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 0"}},h("span",{style:{fontSize:10,color:C.dim,letterSpacing:2,textTransform:"uppercase",fontFamily:"var(--ff)"}},label),h("button",{onClick:()=>onChange(!value),style:{width:46,height:24,borderRadius:12,border:"none",cursor:"pointer",position:"relative",background:value?GP.flat:C.dimmer,transition:"background 0.2s"}},h("div",{style:{width:18,height:18,borderRadius:9,background:"#fff",position:"absolute",top:3,left:value?25:3,transition:"left 0.2s"}})))}
+
+function WtSlider({value,onChange}){
+  return h("div",{style:{marginBottom:16}},h("label",{style:{...sty.lbl,marginBottom:8}},"Weight Distribution"),h("div",{style:{display:"flex",justifyContent:"space-between",marginBottom:6}},h("span",{style:{fontSize:20,fontWeight:800,fontFamily:"var(--fm)",background:GP.flat,WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}},"F "+value+"%"),h("span",{style:{fontSize:20,fontWeight:800,fontFamily:"var(--fm)",color:C.gold}},"R "+(100-value)+"%")),h("div",{style:{position:"relative",height:40,display:"flex",alignItems:"center"}},h("div",{style:{position:"absolute",left:0,right:0,height:8,background:C.dimmer,borderRadius:4,overflow:"hidden"}},h("div",{style:{width:value+"%",height:"100%",background:GP.neon,transition:"width 0.05s"}})),h("input",{type:"range",min:30,max:70,step:1,value:value,onChange:e=>onChange(parseInt(e.target.value)),style:{position:"absolute",left:-2,right:-2,width:"calc(100% + 4px)",height:40,WebkitAppearance:"none",background:"transparent",cursor:"pointer",margin:0,zIndex:2,touchAction:"none"}})))}
+
+function RangeCalc({label,pctVal,mn,mx,color,hideInputs,onMn,onMx}){
+  const actual=fmt(calcVal(mn,mx,pctVal));
+  const bar=h("div",{style:{height:8,background:C.dimmer,borderRadius:4,overflow:"hidden",marginBottom:4}},h("div",{style:{width:clamp(pctVal*100,2,100)+"%",height:"100%",background:color||C.pink,borderRadius:4,transition:"width 0.3s",boxShadow:"0 0 10px "+(color||C.pink)+"44"}}));
+  return h("div",{style:{marginBottom:14}},h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}},h("span",{style:{fontSize:12,color:C.sub,fontFamily:"var(--ff)"}},label),h("span",{style:{fontSize:10,color:C.dim}},pct(pctVal)+"%")),hideInputs?bar:h("div",{style:{display:"flex",gap:6,alignItems:"center",marginBottom:4}},h(NumIn,{value:mn,onChange:onMn,w:"62px"}),h("div",{style:{flex:1}},bar),h(NumIn,{value:mx,onChange:onMx,w:"62px"})),h("div",{style:{textAlign:"center",fontSize:20,fontWeight:700,fontFamily:"var(--fm)",background:GP.pink,WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}},actual))}
+
+function GearPos({gear,ratio}){
+  const rng=GEAR_RANGES[gear]||[.5,5],p=clamp((ratio-rng[0])/(rng[1]-rng[0]),0,1);
+  const col=p<.35?C.green:p>.65?C.blue:C.gold;
+  return h("div",{style:{width:60,height:10,position:"relative",display:"flex",alignItems:"center"}},h("div",{style:{width:"100%",height:3,background:C.dimmer,borderRadius:2}}),h("div",{style:{position:"absolute",left:p*100+"%",width:8,height:8,borderRadius:4,background:col,transform:"translateX(-4px)",boxShadow:"0 0 6px "+col+"66"}}),h("div",{style:{position:"absolute",left:0,fontSize:6,top:-6,color:C.dim}},"S"),h("div",{style:{position:"absolute",right:0,fontSize:6,top:-6,color:C.dim}},"L"))}
+
+function BalRow({label,leftLabel,rightLabel,value,onChange}){
+  return h("div",{style:{marginBottom:14}},h("div",{style:{fontSize:9,color:C.dim,letterSpacing:2,textTransform:"uppercase",marginBottom:6,fontFamily:"var(--ff)"}},label),h("div",{style:{display:"flex",justifyContent:"center",alignItems:"center",gap:6}},h("button",{onClick:()=>onChange(clamp(value-2,-10,10)),style:{padding:"9px 12px",borderRadius:10,border:"none",cursor:"pointer",background:GP.blue,color:"#fff",fontSize:10,fontWeight:700,fontFamily:"var(--ff)",letterSpacing:1,whiteSpace:"nowrap"}},"◂ "+leftLabel),h("div",{style:{width:36,textAlign:"center",fontSize:14,fontWeight:800,fontFamily:"var(--fm)",color:value===0?C.dim:value>0?C.pink:C.blue}},(value>0?"+":"")+value),h("button",{onClick:()=>onChange(clamp(value+2,-10,10)),style:{padding:"9px 12px",borderRadius:10,border:"none",cursor:"pointer",background:GP.flat,color:"#fff",fontSize:10,fontWeight:700,fontFamily:"var(--ff)",letterSpacing:1,whiteSpace:"nowrap"}},rightLabel+" ▸")))}
+
+function PowerBar({dyno}){
+  const{peakTqRpm,peakHpRpm,redline,powerClimb,powerFalloff}=dyno;
+  if(!redline)return null;
+  const lo=powerClimb||Math.max(peakTqRpm*.85,redline*.3),hi2=powerFalloff||Math.min(peakHpRpm+500,redline);
+  const W=300,H=40,P=4,s=rpm=>P+(rpm/redline)*(W-P*2);
+  return h("svg",{viewBox:"0 0 "+W+" "+H,style:{width:"100%",height:"auto",marginTop:10}},h("rect",{x:P,y:14,width:W-P*2,height:12,rx:6,fill:C.dimmer}),h("rect",{x:s(lo),y:14,width:Math.max(0,s(hi2)-s(lo)),height:12,rx:6,fill:"url(#pbG)",opacity:.85}),h("line",{x1:s(peakTqRpm),y1:10,x2:s(peakTqRpm),y2:30,stroke:C.tq,strokeWidth:2}),h("text",{x:s(peakTqRpm),y:8,fill:C.tq,fontSize:7,textAnchor:"middle",fontFamily:"var(--ff)"},"TQ"),h("line",{x1:s(peakHpRpm),y1:10,x2:s(peakHpRpm),y2:30,stroke:C.hp,strokeWidth:2}),h("text",{x:s(peakHpRpm),y:8,fill:C.hp,fontSize:7,textAnchor:"middle",fontFamily:"var(--ff)"},"HP"),h("line",{x1:s(redline),y1:10,x2:s(redline),y2:30,stroke:"#ff2222",strokeWidth:2,strokeDasharray:"2,2"}),h("text",{x:s(lo),y:38,fill:C.dim,fontSize:6,textAnchor:"middle",fontFamily:"var(--fm)"},Math.round(lo)),h("text",{x:s(hi2),y:38,fill:C.dim,fontSize:6,textAnchor:"middle",fontFamily:"var(--fm)"},Math.round(hi2)),h("defs",null,h("linearGradient",{id:"pbG",x1:0,y1:0,x2:1,y2:0},h("stop",{offset:"0%",stopColor:C.tq}),h("stop",{offset:"100%",stopColor:C.hp}))))}
+
+function ArchTag({enginePos,drivetrain,ptw}){
+  const tier=ptw>=HIGH_PTW?"High-Power":"Low-Power";
+  const label=enginePos+"-Engine "+drivetrain+" / "+tier;
+  return h("div",{style:{marginTop:10,padding:"6px 10px",background:"#001a2a",border:"1px solid "+C.blue,borderRadius:6,fontSize:9,color:C.blue,letterSpacing:2,textTransform:"uppercase",fontFamily:"var(--ff)",display:"inline-block"}},label)
+}
+
+// ─── MAIN APP ───
+function App(){
+  const[inp,setInp]=useState({weightFront:52,hp:500,weightLbs:3000,drivetrain:"RWD",enginePos:"Front",tireCompound:"Race",hasAero:false,tireWidthF:245,tireWidthR:275,isController:true});
+  const[dyno,setDyno]=useState({peakHpRpm:7000,peakTqRpm:5000,redline:8500,peakHp:500,peakTq:400,powerClimb:0,powerFalloff:0});
+  const[nG,setNG]=useState(6),[tgtSpd,setTgtSpd]=useState(200);
+  const[ranges,setRanges]=useState({sFMn:200,sFMx:800,sRMn:200,sRMx:800,aFMn:1,aFMx:65,aRMn:1,aRMx:65,rbFMn:1,rbFMx:20,rbRMn:1,rbRMx:20,bpFMn:1,bpFMx:20,bpRMn:1,bpRMx:20});
+  const[eOff,setEOff]=useState(0),[xOff,setXOff]=useState(0);
+  const[tunes,setTunes]=useState([]),[showTunes,setShowTunes]=useState(false);
+  const[saveName,setSaveName]=useState(""),[saveCarName,setSaveCarName]=useState(""),[showSave,setShowSave]=useState(false);
+  // V9.1: track which saved tune is currently loaded (for overwrite)
+  const[loadedTuneId,setLoadedTuneId]=useState(null);
+
+  const si=(k,v)=>setInp(p=>({...p,[k]:v})),sd=(k,v)=>setDyno(p=>({...p,[k]:v}));
+  const pairs={sFMn:"sRMn",sRMn:"sFMn",sFMx:"sRMx",sRMx:"sFMx",aFMn:"aRMn",aRMn:"aFMn",aFMx:"aRMx",aRMx:"aFMx",rbFMn:"rbRMn",rbRMn:"rbFMn",rbFMx:"rbRMx",rbRMx:"rbFMx",bpFMn:"bpRMn",bpRMn:"bpFMn",bpFMx:"bpRMx",bpRMx:"bpFMx"};
+  const sr=(k,v)=>setRanges(p=>{const u={...p,[k]:v};if(pairs[k])u[pairs[k]]=v;return u});
+
+  const ch=useMemo(()=>calcChassis(inp,eOff,xOff),[inp,eOff,xOff]);
+  const ge=useMemo(()=>calcGearing(dyno,nG,tgtSpd,inp.drivetrain),[dyno,nG,tgtSpd,inp.drivetrain]);
+
+  useEffect(()=>{setTunes(loadTunes())},[]);
+
+  // Build a tune snapshot from current state
+  const buildTune=()=>({inp,dyno,nG,tgtSpd,ranges,eOff,xOff,hp:inp.hp,drivetrain:inp.drivetrain});
+
+  // Save as new tune
+  const doSave=()=>{if(!saveName.trim())return;const t={id:Date.now(),name:saveName.trim(),car:saveCarName.trim(),date:new Date().toLocaleDateString(),...buildTune()};const u=[t,...tunes].slice(0,50);setTunes(u);saveTunes(u);setLoadedTuneId(t.id);setSaveName("");setSaveCarName("");setShowSave(false)};
+
+  // Overwrite existing tune in place
+  const doOverwrite=()=>{if(!loadedTuneId)return;const u=tunes.map(t=>{if(t.id!==loadedTuneId)return t;return{...t,...buildTune(),date:new Date().toLocaleDateString()}});setTunes(u);saveTunes(u);setShowSave(false)};
+
+  const doLoad=t=>{setInp(t.inp);setDyno(t.dyno);setNG(t.nG);setTgtSpd(t.tgtSpd);setRanges(t.ranges);setEOff(t.eOff||0);setXOff(t.xOff||0);setLoadedTuneId(t.id);setShowTunes(false)};
+  const doDel=id=>{const u=tunes.filter(t=>t.id!==id);setTunes(u);saveTunes(u);if(loadedTuneId===id)setLoadedTuneId(null)};
+
+  // Find loaded tune name for display
+  const loadedTune=loadedTuneId?tunes.find(t=>t.id===loadedTuneId):null;
+
+  const cd=sty.card,sb=sty.statBox,sl=sty.statLbl;
+  const pills=(opts,key)=>h("div",{style:{display:"flex",gap:5,flexWrap:"wrap"}},opts.map(x=>h(Pill,{key:x,label:x,active:inp[key]===x,onClick:()=>si(key,x)})));
+
+  return h("div",{style:{padding:"20px 12px 60px",background:"radial-gradient(ellipse at 50% 0%,#1a0a14 0%,"+C.bg+" 60%)",minHeight:"100vh"}},
+
+    // Header
+    h("div",{style:{textAlign:"center",marginBottom:20}},
+      h("div",{style:{fontSize:10,letterSpacing:8,color:C.gold,fontFamily:"var(--ff)",fontWeight:300,marginBottom:4}},"✦ FORZA HORIZON 5 ✦"),
+      h("div",{style:{fontSize:26,fontWeight:800,letterSpacing:3,textTransform:"uppercase",fontFamily:"var(--ff)",background:GP.pink,WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}},"UNIVERSAL TUNER"),
+      h("div",{style:{fontSize:9,color:C.dim,letterSpacing:4,marginTop:3,fontFamily:"var(--ff)"}},"V9.1 ✦ STANDALONE"),
+      h("div",{style:{width:50,height:2,background:GP.gold,margin:"10px auto 0",borderRadius:1}}),
+      // Active tune indicator
+      loadedTune&&h("div",{style:{marginTop:8,fontSize:10,color:C.green,fontFamily:"var(--ff)",letterSpacing:1}},"✦ "+loadedTune.name+(loadedTune.car?" — "+loadedTune.car:"")+" ✦"),
+      h("div",{style:{display:"flex",justifyContent:"center",gap:8,marginTop:loadedTune?8:12}},
+        h("button",{onClick:()=>setShowSave(!showSave),style:{padding:"8px 16px",borderRadius:20,border:"none",cursor:"pointer",background:GP.gold,color:"#000",fontSize:11,fontWeight:700,fontFamily:"var(--ff)",letterSpacing:1}},"✦ SAVE"),
+        loadedTune&&h("button",{onClick:doOverwrite,style:{padding:"8px 16px",borderRadius:20,border:"none",cursor:"pointer",background:GP.neon,color:"#fff",fontSize:11,fontWeight:700,fontFamily:"var(--ff)",letterSpacing:1}},"↻ UPDATE"),
+        h("button",{onClick:()=>setShowTunes(!showTunes),style:{padding:"8px 16px",borderRadius:20,border:"1px solid "+C.dimmer,cursor:"pointer",background:"transparent",color:C.dim,fontSize:11,fontWeight:600,fontFamily:"var(--ff)",letterSpacing:1}},"MY TUNES ("+tunes.length+")"))),
+
+    // Save form
+    showSave&&h("div",{style:cd},h(Sec,{title:"Save As New Tune",icon:"💾"},h(TxtIn,{label:"Tune Name",value:saveName,onChange:setSaveName,placeholder:"e.g. Grip Build v2"}),h("div",{style:{marginTop:8}},h(TxtIn,{label:"Car Name",value:saveCarName,onChange:setSaveCarName,placeholder:"e.g. 2020 Supra"})),h("button",{onClick:doSave,style:{width:"100%",padding:"12px 0",borderRadius:10,border:"none",background:GP.flat,color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"var(--ff)",marginTop:12}},"Save New"))),
+
+    // Tunes list
+    showTunes&&h("div",{style:cd},h(Sec,{title:"Saved Tunes",icon:"📋"},tunes.length===0&&h("div",{style:{fontSize:11,color:C.dim,textAlign:"center",padding:20,fontFamily:"var(--ff)"}},"No saved tunes yet"),tunes.map(t=>h("div",{key:t.id,style:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid "+C.dimmer+"22",background:t.id===loadedTuneId?"#0a1a0a":"transparent",borderRadius:t.id===loadedTuneId?6:0,padding:t.id===loadedTuneId?"10px 8px":"10px 0"}},h("div",null,h("div",{style:{fontSize:13,color:t.id===loadedTuneId?C.green:C.text,fontWeight:600,fontFamily:"var(--ff)"}},t.name,t.id===loadedTuneId&&h("span",{style:{fontSize:8,color:C.green,marginLeft:6,letterSpacing:1}},"● LOADED")),h("div",{style:{fontSize:10,color:C.dim,fontFamily:"var(--ff)"}},(t.car||"—")+" · "+t.hp+"hp "+t.drivetrain+" · "+t.date)),h("div",{style:{display:"flex",gap:6}},h("button",{onClick:()=>doLoad(t),style:{padding:"6px 12px",borderRadius:8,border:"none",background:t.id===loadedTuneId?GP.neon:GP.flat,color:"#fff",fontSize:10,fontWeight:700,cursor:"pointer",fontFamily:"var(--ff)"}},t.id===loadedTuneId?"Reload":"Load"),h("button",{onClick:()=>doDel(t.id),style:{padding:"6px 10px",borderRadius:8,border:"1px solid "+C.dimmer,background:"transparent",color:C.red,fontSize:10,cursor:"pointer",fontFamily:"var(--ff)"}},"✕")))))),
+
+    // Vehicle
+    h("div",{style:cd},h(Sec,{title:"Vehicle",icon:"♛"},
+      h("div",{style:{display:"flex",gap:10,marginBottom:12}},h(NumIn,{label:"Horsepower",value:inp.hp,onChange:v=>{si("hp",v);sd("peakHp",v)}}),h(NumIn,{label:"Weight (lbs)",value:inp.weightLbs,onChange:v=>si("weightLbs",v)})),
+      h(WtSlider,{value:inp.weightFront,onChange:v=>si("weightFront",v)}),
+      h("div",{style:{marginBottom:12}},h("label",{style:sty.lbl},"Drivetrain"),pills(DRIVETRAINS,"drivetrain")),
+      h("div",{style:{marginBottom:12}},h("label",{style:sty.lbl},"Engine Position"),pills(ENGINE_POS,"enginePos")),
+      h("div",{style:{marginBottom:12}},h("label",{style:sty.lbl},"Tires"),pills(TIRES,"tireCompound")),
+      h("div",{style:{display:"flex",gap:10,marginBottom:8}},h(NumIn,{label:"Front Tire (mm)",value:inp.tireWidthF,onChange:v=>si("tireWidthF",v),min:155,max:395}),h(NumIn,{label:"Rear Tire (mm)",value:inp.tireWidthR,onChange:v=>si("tireWidthR",v),min:155,max:395})),
+      h(Toggle,{label:"Adjustable Aero",value:inp.hasAero,onChange:v=>si("hasAero",v)}),
+      h("div",{style:{display:"flex",gap:5,marginTop:4}},h("label",{style:{...sty.lbl,lineHeight:"28px"}},"Input"),["Controller","Wheel"].map(m=>h(Pill,{key:m,label:m,active:inp.isController===(m==="Controller"),onClick:()=>si("isController",m==="Controller"),color:m==="Controller"?GP.neon:GP.gold}))),
+      h(ArchTag,{enginePos:inp.enginePos,drivetrain:inp.drivetrain,ptw:inp.hp/Math.max(inp.weightLbs,1)}))),
+
+    // Power & Gearing
+    h("div",{style:cd},h(Sec,{title:"Power & Gearing",icon:"⚡"},
+      h("div",{style:{fontSize:10,color:C.dim,marginBottom:12,lineHeight:1.6,fontFamily:"var(--ff)"}},"Enter 5 numbers from your in-game dyno screen."),
+      h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}},h(NumIn,{label:"Peak HP",value:dyno.peakHp,onChange:v=>{sd("peakHp",v);si("hp",v)}}),h(NumIn,{label:"@ RPM",value:dyno.peakHpRpm,onChange:v=>sd("peakHpRpm",v)})),
+      h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}},h(NumIn,{label:"Peak TQ",value:dyno.peakTq,onChange:v=>sd("peakTq",v)}),h(NumIn,{label:"@ RPM",value:dyno.peakTqRpm,onChange:v=>sd("peakTqRpm",v)})),
+      h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}},h(NumIn,{label:"Redline RPM",value:dyno.redline,onChange:v=>sd("redline",v)}),h(NumIn,{label:"Target MPH",value:tgtSpd,onChange:setTgtSpd})),
+      h("div",{style:{marginBottom:12}},h("label",{style:sty.lbl},"Gears"),h("div",{style:{display:"flex",gap:4}},GEAR_COUNTS.map(n=>h(Pill,{key:n,label:n,active:nG===n,onClick:()=>setNG(n)})))),
+      h("div",{style:{padding:"10px 12px",background:"#0e080b",borderRadius:8,border:"1px solid "+C.dimmer,marginBottom:10}},h("div",{style:{fontSize:9,color:C.dim,letterSpacing:2,textTransform:"uppercase",marginBottom:8,fontFamily:"var(--ff)"}},"Optional — Turbo / Peaky Engines"),h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}},h(NumIn,{label:"Power Starts (RPM)",value:dyno.powerClimb||"",onChange:v=>sd("powerClimb",v)}),h(NumIn,{label:"Power Drops (RPM)",value:dyno.powerFalloff||"",onChange:v=>sd("powerFalloff",v)}))),
+      h(PowerBar,{dyno}))),
+
+    // Gearing Output
+    ge&&h("div",{style:cd},h(Sec,{title:"Gearing Output",icon:"⟐"},
+      h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginBottom:14}},h("div",{style:sb},h("div",{style:sl},"Launch RPM"),h("div",{style:{fontSize:20,fontWeight:700,fontFamily:"var(--fm)",background:GP.flat,WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}},ge.launchRpm)),h("div",{style:sb},h("div",{style:sl},"Final Drive"),h("div",{style:{fontSize:20,fontWeight:700,fontFamily:"var(--fm)",color:C.gold}},ge.finalDrive)),h("div",{style:sb},h("div",{style:sl},"Top Speed"),h("div",{style:{fontSize:20,fontWeight:700,fontFamily:"var(--fm)",color:C.chrome}},ge.calcTopSpeed))),
+      h(Row,{label:"Final Drive",value:ge.finalDrive,extra:h(GearPos,{gear:"FD",ratio:ge.finalDrive})}),
+      ge.ratios.map((r,i)=>h(Row,{key:i,label:(i+1)+(["st","nd","rd"][i]||"th"),value:r,extra:h(GearPos,{gear:i+1,ratio:r})})),
+      h("div",{style:{marginTop:10,padding:10,background:"#0e080b",borderRadius:8,fontSize:11,color:C.sub,lineHeight:1.8,fontFamily:"var(--fm)"}},h("span",{style:{fontSize:9,color:C.dim,letterSpacing:2,textTransform:"uppercase",fontFamily:"var(--ff)"}},"SHIFT AT "),h("span",{style:{color:C.pink,fontWeight:700}},ge.shiftPoint),h("span",{style:{color:C.dim}}," RPM"),ge.shiftPoints.map((sp,i)=>h("span",{key:i,style:{color:C.dim}},(i===0?" · ":"")+sp.gear+"→"+(sp.gear+1)+": ",h("span",{style:{color:C.sub}},sp.dropTo),(i<ge.shiftPoints.length-1?" · ":"")))))),
+
+    // Handling Balance
+    h("div",{style:cd},h(Sec,{title:"Handling Balance",icon:"☯"},
+      h("div",{style:{fontSize:10,color:C.dim,marginBottom:12,lineHeight:1.6,fontFamily:"var(--ff)"}},"Adjust after testing. Entry = turn-in to apex. Exit = apex to throttle."),
+      h("div",{style:{display:"flex",gap:6,marginBottom:14}},[["GRIP",-4,-3,GP.blue],["BALANCED",0,0,"linear-gradient(135deg,"+C.gold+","+C.chrome+")"],["ROTATION",5,4,GP.flat]].map(([l,e,x,bg])=>h("button",{key:l,onClick:()=>{setEOff(e);setXOff(x)},style:{flex:1,padding:"10px 0",borderRadius:10,border:"none",cursor:"pointer",background:bg,color:l==="BALANCED"?"#000":"#fff",fontSize:10,fontWeight:700,fontFamily:"var(--ff)",letterSpacing:1}},l))),
+      h(BalRow,{label:"Corner Entry",leftLabel:"PUSH",rightLabel:"ROTATE",value:eOff,onChange:setEOff}),
+      h(BalRow,{label:"Corner Exit",leftLabel:"GRIP",rightLabel:"LOOSE",value:xOff,onChange:setXOff}),
+      h("button",{onClick:()=>{setEOff(0);setXOff(0)},style:{width:"100%",padding:"8px 0",borderRadius:8,border:"1px solid "+C.dimmer,background:"transparent",color:C.dim,fontSize:10,cursor:"pointer",fontFamily:"var(--ff)",letterSpacing:2}},"RESET TO BASELINE"),
+      h("div",{style:{fontSize:9,color:C.dim,marginTop:8,lineHeight:1.5,textAlign:"center",fontFamily:"var(--ff)"}},eOff===0&&xOff===0?"Baseline":"Entry "+(eOff>0?"rotate":"push")+" "+Math.abs(eOff)+"/10 · Exit "+(xOff>0?"loose":"grip")+" "+Math.abs(xOff)+"/10"))),
+
+    // Springs
+    h("div",{style:cd},h(Sec,{title:"Springs",icon:"◆"},h("div",{style:{display:"flex",gap:6,alignItems:"center",marginBottom:12}},h(NumIn,{label:"Min",value:ranges.sFMn,onChange:v=>sr("sFMn",v),w:"80px"}),h("div",{style:{flex:1,fontSize:9,color:C.dim,textAlign:"center",fontFamily:"var(--ff)"}},"SPRING RANGE"),h(NumIn,{label:"Max",value:ranges.sFMx,onChange:v=>sr("sFMx",v),w:"80px"})),h(RangeCalc,{label:"Front (lbs/in)",pctVal:ch.springs.fPct,mn:ranges.sFMn,mx:ranges.sFMx,color:C.pink,hideInputs:true}),h(RangeCalc,{label:"Rear (lbs/in)",pctVal:ch.springs.rPct,mn:ranges.sRMn,mx:ranges.sRMx,color:C.hotPink,hideInputs:true}))),
+
+    // Damping
+    h("div",{style:cd},h(Sec,{title:"Damping",icon:"✧"},h("div",{style:{display:"flex",gap:6,alignItems:"center",marginBottom:12}},h(NumIn,{label:"Min",value:ranges.rbFMn,onChange:v=>{sr("rbFMn",v);sr("bpFMn",v)},w:"80px"}),h("div",{style:{flex:1,fontSize:9,color:C.dim,textAlign:"center",fontFamily:"var(--ff)"}},"DAMPING RANGE"),h(NumIn,{label:"Max",value:ranges.rbFMx,onChange:v=>{sr("rbFMx",v);sr("bpFMx",v)},w:"80px"})),h(RangeCalc,{label:"Rebound Front",pctVal:ch.damp.rbF,mn:ranges.rbFMn,mx:ranges.rbFMx,color:C.purple,hideInputs:true}),h(RangeCalc,{label:"Rebound Rear",pctVal:ch.damp.rbR,mn:ranges.rbRMn,mx:ranges.rbRMx,color:"#8844dd",hideInputs:true}),h(RangeCalc,{label:"Bump Front",pctVal:ch.damp.bpF,mn:ranges.bpFMn,mx:ranges.bpFMx,color:C.gold,hideInputs:true}),h(RangeCalc,{label:"Bump Rear",pctVal:ch.damp.bpR,mn:ranges.bpRMn,mx:ranges.bpRMx,color:"#c49940",hideInputs:true}))),
+
+    // ARBs
+    h("div",{style:cd},h(Sec,{title:"Anti-Roll Bars",icon:"◈"},h("div",{style:{display:"flex",gap:6,alignItems:"center",marginBottom:12}},h(NumIn,{label:"Min",value:ranges.aFMn,onChange:v=>sr("aFMn",v),w:"80px"}),h("div",{style:{flex:1,fontSize:9,color:C.dim,textAlign:"center",fontFamily:"var(--ff)"}},"ARB RANGE"),h(NumIn,{label:"Max",value:ranges.aFMx,onChange:v=>sr("aFMx",v),w:"80px"})),h(RangeCalc,{label:"Front ARB",pctVal:ch.arb.fPct,mn:ranges.aFMn,mx:ranges.aFMx,color:C.neon,hideInputs:true}),h(RangeCalc,{label:"Rear ARB",pctVal:ch.arb.rPct,mn:ranges.aRMn,mx:ranges.aRMx,color:"#dd2288",hideInputs:true}))),
+
+    // Static outputs
+    h("div",{style:cd},
+      h(Sec,{title:"Tire Pressure",icon:"◉"},
+        h(Row,{label:"Front",value:ch.pressF+" PSI",badge:ch.pressConf}),
+        h(Row,{label:"Rear", value:ch.pressR+" PSI",badge:ch.pressConf}),
+        (inp.tireCompound!=="Slicks")&&h("div",{style:{marginTop:8,fontSize:9,color:C.dim,fontFamily:"var(--ff)",lineHeight:1.6}},"⚠ Non-slick pressure values are [Theory] — not yet in-game validated")),
+      h(Sec,{title:"Alignment",icon:"⊕"},
+        h(Row,{label:"Camber F",value:ch.align.camF+"°",badge:ch.align.camberConf}),
+        h(Row,{label:"Camber R",value:ch.align.camR+"°",badge:ch.align.camberConf}),
+        h(Row,{label:"Toe F",value:ch.align.toeF+"°",sub:ch.align.toeF<0?"toe-out":ch.align.toeF>0?"toe-in":"neutral"}),
+        h(Row,{label:"Toe R",value:ch.align.toeR+"°",sub:ch.align.toeR<0?"toe-out":ch.align.toeR>0?"toe-in":"neutral"}),
+        h(Row,{label:"Caster",value:ch.align.caster+"°"})),
+      h(Sec,{title:"Ride Height",icon:"▬"},h(Row,{label:"Front",value:pct(ch.ride.f)+"% of range",sub:"low as stable"}),h(Row,{label:"Rear",value:pct(ch.ride.r)+"% of range",sub:"slightly above front"})),
+      ch.aero&&h(Sec,{title:"Aero",icon:"≋"},h(Row,{label:"Front",value:ch.aero.f}),h(Row,{label:"Rear",value:ch.aero.r})),
+      h(Sec,{title:"Brakes",icon:"⊘"},h(Row,{label:"Balance",value:ch.brakes.balance+"% Front"}),h(Row,{label:"Pressure",value:ch.brakes.pressure+"%"})),
+      h(Sec,{title:"Differential",icon:"⚙"},
+        inp.drivetrain==="AWD"&&ch.diff.center&&h(Row,{label:"Center",value:ch.diff.center+"% Rear"}),
+        (inp.drivetrain==="FWD"||inp.drivetrain==="AWD")&&ch.diff.frontAccel!==undefined&&[h(Row,{key:"fa",label:"Front Accel",value:ch.diff.frontAccel+"%"}),h(Row,{key:"fd",label:"Front Decel",value:ch.diff.frontDecel+"%"})],
+        (inp.drivetrain==="RWD"||inp.drivetrain==="AWD")&&ch.diff.rearAccel!==undefined&&[h(Row,{key:"ra",label:"Rear Accel",value:ch.diff.rearAccel+"%"}),h(Row,{key:"rd",label:"Rear Decel",value:ch.diff.rearDecel+"%"})])),
+
+    h("div",{style:{textAlign:"center",fontSize:9,color:C.dimmer,letterSpacing:3,marginTop:16}},"✦ BUILT WITH LOVE ✦"))
+}
+
+ReactDOM.render(h(App),document.getElementById("root"));
+</script>
+</body>
+</html>
