@@ -1,4 +1,4 @@
-<!DOCTYPE  html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -128,24 +128,38 @@ function calcChassis(inp,eOff,xOff){
   return{springs:{fPct:fS,rPct:rS},arb:{fPct:fA,rPct:rA},damp:{rbF,rbR,bpF,bpR},ride:{f:hasAero?.3:.15,r:hasAero?.35:.18},align:{camF,camR,toeF,toeR,caster,camberConf},diff,brakes:{balance:bb,pressure:bp2},pressF,pressR,pressConf,aero,meta:{hpw:Math.round(hpw*1000)/1000,pl,wR,arch,ptw}}
 }
 
+// ── GEARING — v9.3 overhaul preserved ────────────────────────────────────────
 function calcGearing(dyno,nG,tgtSpd,dt){
   const{peakHpRpm,peakTqRpm,redline,powerClimb,powerFalloff}=dyno;
   if(!redline||!peakHpRpm||!peakTqRpm||!tgtSpd)return null;
   const pbLow=powerClimb||Math.max(peakTqRpm*.85,redline*.3),pbHigh=powerFalloff||Math.min(peakHpRpm+500,redline);
   const shiftRpm=clamp(Math.round(pbHigh),pbLow+500,redline-100);
+
+  // PTW-aware first gear (requires weightLbs — use dyno.weightLbs if available, else drivetrain default)
+  const baseFirst={RWD:3.2,FWD:3.0,AWD:2.8}[dt]||3.0;
+  let fg=baseFirst;
+
   const sp=(redline*TIRE_K)/tgtSpd;
-  let fg=({RWD:3.2,FWD:3,AWD:2.8})[dt]||3,tTG=.8,fd=sp/tTG;
+  let tTG=.8,fd=sp/tTG;
   if(fd>6){fd=6;tTG=sp/fd}else if(fd<2){fd=2;tTG=sp/fd}
   tTG=clamp(tTG,.5,2.5);
+
   let K=Math.pow(tTG/fg,1/(nG-1));
   if(K<.6){fg=clamp(tTG/Math.pow(.6,nG-1),1.5,5);K=Math.pow(tTG/fg,1/(nG-1))}
   else if(K>.92){fg=clamp(tTG/Math.pow(.92,nG-1),1.5,5);K=Math.pow(tTG/fg,1/(nG-1))}
+
   const ratios=[];for(let i=0;i<nG;i++)ratios.push(fmtG(fg*Math.pow(K,i)));
   const aT=ratios[ratios.length-1];fd=fmtG(clamp((redline*TIRE_K)/(tgtSpd*aT),2,6));
   const sPs=ratios.slice(0,-1).map((r,i)=>({gear:i+1,shiftAt:shiftRpm,dropTo:Math.round(shiftRpm*(ratios[i+1]/r))}));
   const lRpm=Math.round(peakTqRpm*({RWD:.65,FWD:.8,AWD:.85}[dt]||.7));
   const cTS=Math.round((redline*TIRE_K)/(aT*fd));
-  return{ratios,finalDrive:fd,shiftPoints:sPs,shiftPoint:shiftRpm,launchRpm:lRpm,pbLow:Math.round(pbLow),pbHigh:Math.round(pbHigh),K:fmtG(K),calcTopSpeed:cTS}
+
+  // Spread label
+  const Kf=fmtG(K);
+  const spreadLabel=Kf<0.72?"WIDE":Kf<=0.80?"BALANCED":Kf<=0.87?"TIGHT":"VERY TIGHT";
+  const spreadColor=Kf<0.72?C.blue:Kf<=0.80?C.gold:Kf<=0.87?C.cyan:C.pink;
+
+  return{ratios,finalDrive:fd,shiftPoints:sPs,shiftPoint:shiftRpm,launchRpm:lRpm,pbLow:Math.round(pbLow),pbHigh:Math.round(pbHigh),K:Kf,spreadLabel,spreadColor,calcTopSpeed:cTS}
 }
 
 function loadTunes(){try{return JSON.parse(localStorage.getItem("fh5-tunes"))||[]}catch{return[]}}
@@ -208,8 +222,31 @@ function computeTrends(tunes){
   return{avgEntry,avgExit,entryCount:entryOffsets.length,exitCount:exitOffsets.length,rangeDeltas,archetypes};
 }
 
-// ── DYNO SCAN ────────────────────────────────────────────────────────────────
-const SCAN_INSTRUCTION="You are reading a Forza Horizon 5 in-game dyno graph screenshot. Extract exactly 5 values by reading the graph axes and curve peaks:\n- peakHp: peak horsepower (pink/red curve peak, Y-axis number)\n- peakHpRpm: RPM at peak HP (X-axis)\n- peakTq: peak torque lb-ft (yellow/white curve, Y-axis number)\n- peakTqRpm: RPM at peak torque (X-axis)\n- redline: maximum RPM shown on X-axis\n\nReturn ONLY a raw JSON object. No markdown. No backticks. No words.\nExample: {\"peakHp\":650,\"peakHpRpm\":7200,\"peakTq\":480,\"peakTqRpm\":5000,\"redline\":8500}\n\nIf a value is unreadable use 0. Round HP/TQ to nearest 10. Round RPM to nearest 100.";
+// ── DYNO SCAN — v9.5: improved prompt + inline edit fix ──────────────────────
+
+// FH5-specific visual description so Claude Vision knows what to look for
+const SCAN_INSTRUCTION=
+"You are reading a screenshot of the Forza Horizon 5 in-game dyno graph screen.\n\n"+
+"VISUAL LAYOUT:\n"+
+"- Dark background with colored gridlines\n"+
+"- TWO curves: a pink/red curve (Horsepower) and a yellow/orange curve (Torque)\n"+
+"- X-axis = RPM, running left to right. The rightmost tick is the redline.\n"+
+"- Y-axes are DUAL SCALE: HP scale on one side, Torque (lb-ft) scale on the other — do NOT confuse them\n"+
+"- Peak values are shown as CALLOUT LABELS printed directly on the graph next to a dot or marker on each curve. Read those printed numbers — do NOT estimate from axis position.\n"+
+"- The HP peak label is near the top of the pink/red curve. The Torque peak label is near the top of the yellow curve.\n"+
+"- The RPM for each peak is directly below its label on the X-axis.\n\n"+
+"YOUR TASK:\n"+
+"Extract exactly these 5 values from the callout labels and axis:\n"+
+"  peakHp — the number printed at the HP curve peak (horsepower)\n"+
+"  peakHpRpm — the RPM at that peak (read from X-axis below the HP label)\n"+
+"  peakTq — the number printed at the Torque curve peak (lb-ft)\n"+
+"  peakTqRpm — the RPM at that peak\n"+
+"  redline — the highest RPM value shown on the X-axis (rightmost tick)\n\n"+
+"RULES:\n"+
+"- Return ONLY a raw JSON object. No markdown. No backticks. No explanation.\n"+
+"- Example: {\"peakHp\":650,\"peakHpRpm\":7200,\"peakTq\":480,\"peakTqRpm\":5000,\"redline\":8500}\n"+
+"- If a value is genuinely unreadable, use 0.\n"+
+"- Round HP and Torque to nearest whole number. Round all RPM values to nearest 100.";
 
 async function scanDynoImage(b64,mediaType){
   let resp,data;
@@ -222,10 +259,10 @@ async function scanDynoImage(b64,mediaType){
         max_tokens:300,
         messages:[
           {role:"user",content:SCAN_INSTRUCTION},
-          {role:"assistant",content:"Understood. Send the screenshot and I will return only the JSON."},
+          {role:"assistant",content:"Understood. I will read the callout labels from the FH5 dyno graph and return only the JSON object."},
           {role:"user",content:[
             {type:"image",source:{type:"base64",media_type:mediaType,data:b64}},
-            {type:"text",text:"Read this FH5 dyno graph and return the JSON."}
+            {type:"text",text:"Read the callout labels on this FH5 dyno graph and return the JSON."}
           ]}
         ]
       })
@@ -244,20 +281,20 @@ async function scanDynoImage(b64,mediaType){
   return parsed;
 }
 
-// Resize image to max 1200px wide before encoding — keeps payload fast
 function resizeAndEncode(file){
   return new Promise((resolve,reject)=>{
     const img=new Image();
     const url=URL.createObjectURL(file);
     img.onload=()=>{
-      const MAX=1200;
+      const MAX=1400;
       let w=img.width,h=img.height;
       if(w>MAX){h=Math.round(h*MAX/w);w=MAX;}
       const canvas=document.createElement("canvas");
       canvas.width=w;canvas.height=h;
       canvas.getContext("2d").drawImage(img,0,0,w,h);
       URL.revokeObjectURL(url);
-      const dataUrl=canvas.toDataURL("image/jpeg",0.88);
+      // Higher quality — dyno text needs to be legible
+      const dataUrl=canvas.toDataURL("image/jpeg",0.94);
       resolve({b64:dataUrl.split(",")[1],mediaType:"image/jpeg"});
     };
     img.onerror=()=>{URL.revokeObjectURL(url);reject(new Error("Could not load image"));};
@@ -265,7 +302,7 @@ function resizeAndEncode(file){
   });
 }
 
-// ── Components ───────────────────────────────────────────────────────────────
+// ── Components ────────────────────────────────────────────────────────────────
 const sty={card:{background:C.card,border:"1px solid "+C.border,borderRadius:14,padding:16,maxWidth:540,margin:"0 auto 16px",boxShadow:"0 4px 30px "+C.pink+"08"},
 statBox:{background:"#0e080b",borderRadius:8,padding:10,textAlign:"center"},
 statLbl:{fontSize:9,color:C.dim,letterSpacing:2,textTransform:"uppercase",marginBottom:4,fontFamily:"var(--ff)"},
@@ -325,7 +362,39 @@ function ArchTag({enginePos,drivetrain,ptw}){
   return h("div",{style:{marginTop:10,padding:"6px 10px",background:"#001a2a",border:"1px solid "+C.blue,borderRadius:6,fontSize:9,color:C.blue,letterSpacing:2,textTransform:"uppercase",fontFamily:"var(--ff)",display:"inline-block"}},label)
 }
 
-// ── Dyno Scan Overlay ────────────────────────────────────────────────────────
+// ── Scan confirm field — v9.5: local string state, commit on blur ─────────────
+function ScanField({fieldDef,value,onChange}){
+  const[raw,setRaw]=useState(String(value||""));
+  const foc=useRef(false);
+
+  // Sync from parent only when not focused
+  useEffect(()=>{
+    if(!foc.current)setRaw(String(value||""));
+  },[value]);
+
+  const commit=()=>{
+    const n=parseFloat(raw);
+    if(!isNaN(n)&&n>0){onChange(n);setRaw(String(n));}
+    else setRaw(String(value||""));
+  };
+
+  return h("div",{style:{background:"#080610",border:"1px solid "+fieldDef.color+"44",borderRadius:8,padding:"10px 12px"}},
+    h("div",{style:{fontSize:9,color:C.dim,letterSpacing:2,textTransform:"uppercase",fontFamily:"var(--ff)",marginBottom:3}},fieldDef.label),
+    h("div",{style:{display:"flex",alignItems:"baseline",gap:4}},
+      h("input",{
+        type:"text",
+        inputMode:"decimal",
+        value:raw,
+        onChange:e=>setRaw(e.target.value),
+        onFocus:()=>{foc.current=true;},
+        onBlur:()=>{foc.current=false;commit();},
+        onKeyDown:e=>{if(e.key==="Enter")e.target.blur();},
+        style:{background:"transparent",border:"none",outline:"none",color:fieldDef.color,fontSize:20,fontWeight:700,fontFamily:"var(--fm)",width:"100%",WebkitAppearance:"none"}
+      }),
+      h("span",{style:{fontSize:10,color:C.dim,fontFamily:"var(--ff)"}},fieldDef.unit)));
+}
+
+// ── Dyno Scan Overlay ─────────────────────────────────────────────────────────
 const SCAN_FIELDS=[
   {key:"peakHp",    label:"Peak HP",         unit:"hp",   color:C.hp},
   {key:"peakHpRpm", label:"Peak HP RPM",     unit:"rpm",  color:C.hp},
@@ -335,7 +404,7 @@ const SCAN_FIELDS=[
 ];
 
 function ScanOverlay({onApply,onClose}){
-  const[scanPhase,setScanPhase]=useState("idle"); // idle|scanning|confirm|error
+  const[scanPhase,setScanPhase]=useState("idle");
   const[scanVals,setScanVals]=useState({peakHp:0,peakHpRpm:0,peakTq:0,peakTqRpm:0,redline:0});
   const[errMsg,setErrMsg]=useState("");
   const[imgSrc,setImgSrc]=useState(null);
@@ -345,7 +414,6 @@ function ScanOverlay({onApply,onClose}){
     const file=e.target.files?.[0];
     if(!file)return;
     e.target.value="";
-    // Show preview immediately
     const previewUrl=URL.createObjectURL(file);
     setImgSrc(previewUrl);
     setScanPhase("scanning");
@@ -367,11 +435,12 @@ function ScanOverlay({onApply,onClose}){
     }
   },[]);
 
+  const updateField=(key,val)=>setScanVals(p=>({...p,[key]:val}));
+
   const ov={position:"fixed",inset:0,background:"rgba(10,6,8,0.96)",zIndex:1000,overflowY:"auto",padding:"20px 12px 60px"};
   const card2={background:C.card,border:"1px solid "+C.border,borderRadius:14,padding:16,maxWidth:520,margin:"0 auto 16px"};
 
   return h("div",{style:ov},
-    // Header
     h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",maxWidth:520,margin:"0 auto 16px"}},
       h("div",null,
         h("div",{style:{fontSize:10,letterSpacing:4,color:C.gold,fontFamily:"var(--ff)"}},"✦ FH5 DYNO"),
@@ -382,8 +451,8 @@ function ScanOverlay({onApply,onClose}){
 
       // IDLE
       scanPhase==="idle"&&h("div",{style:{textAlign:"center",padding:"16px 0"}},
-        h("div",{style:{fontSize:11,color:C.sub,fontFamily:"var(--ff)",lineHeight:1.8,marginBottom:20}},
-          "Open the FH5 dyno screen.",h("br"),"Snap a clear photo of the graph."),
+        h("div",{style:{fontSize:11,color:C.sub,fontFamily:"var(--ff)",lineHeight:1.8,marginBottom:12}},
+          "Open the FH5 dyno screen. Snap a clear, straight-on photo.",h("br"),"Avoid angle — the number callouts need to be readable."),
         h("label",{htmlFor:"dynoFile",style:{display:"block",padding:"14px 24px",borderRadius:12,cursor:"pointer",background:GP.flat,color:"#fff",fontSize:13,fontWeight:700,fontFamily:"var(--ff)",letterSpacing:1}},"📷  OPEN CAMERA"),
         h("input",{id:"dynoFile",ref:fileRef,type:"file",accept:"image/*",capture:"environment",onChange:handleFile,style:{display:"none"}})),
 
@@ -391,24 +460,15 @@ function ScanOverlay({onApply,onClose}){
       scanPhase==="scanning"&&h("div",{style:{textAlign:"center",padding:"30px 0"}},
         imgSrc&&h("img",{src:imgSrc,style:{width:"100%",borderRadius:8,marginBottom:16,opacity:0.6,border:"1px solid "+C.border}}),
         h("div",{style:{fontSize:28,color:C.cyan,marginBottom:10}},"⟳"),
-        h("div",{style:{fontSize:11,color:C.cyan,fontFamily:"var(--ff)",letterSpacing:2}},"READING GRAPH...")),
+        h("div",{style:{fontSize:11,color:C.cyan,fontFamily:"var(--ff)",letterSpacing:2}},"READING CALLOUT LABELS...")),
 
-      // CONFIRM
+      // CONFIRM — v9.5: ScanField with local string state
       scanPhase==="confirm"&&h("div",null,
-        h("div",{style:{fontSize:10,color:C.cyan,letterSpacing:2,fontFamily:"var(--ff)",marginBottom:10}},"✓ GRAPH READ — verify values"),
-        imgSrc&&h("img",{src:imgSrc,style:{width:"100%",borderRadius:8,marginBottom:12,opacity:0.55,border:"1px solid "+C.border}}),
-        h("div",{style:{fontSize:10,color:C.sub,fontFamily:"var(--ff)",marginBottom:12,lineHeight:1.6}},"Tap any field to correct it before applying."),
+        h("div",{style:{fontSize:10,color:C.cyan,letterSpacing:2,fontFamily:"var(--ff)",marginBottom:10}},"✓ GRAPH READ — verify before applying"),
+        imgSrc&&h("img",{src:imgSrc,style:{width:"100%",borderRadius:8,marginBottom:12,opacity:0.5,border:"1px solid "+C.border}}),
+        h("div",{style:{fontSize:10,color:C.sub,fontFamily:"var(--ff)",marginBottom:12,lineHeight:1.6}},"Tap any value to correct it. Changes apply on tap-away."),
         h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:16}},
-          SCAN_FIELDS.map(f=>h("div",{key:f.key,style:{background:"#080610",border:"1px solid "+f.color+"44",borderRadius:8,padding:"10px 12px"}},
-            h("div",{style:{fontSize:9,color:C.dim,letterSpacing:2,textTransform:"uppercase",fontFamily:"var(--ff)",marginBottom:3}},f.label),
-            h("div",{style:{display:"flex",alignItems:"baseline",gap:4}},
-              h("input",{
-                type:"text",inputMode:"decimal",
-                value:scanVals[f.key]||"",
-                onChange:e=>{const v=parseFloat(e.target.value);if(!isNaN(v))setScanVals(p=>({...p,[f.key]:v}));},
-                style:{background:"transparent",border:"none",outline:"none",color:f.color,fontSize:20,fontWeight:700,fontFamily:"var(--fm)",width:"100%"}
-              }),
-              h("span",{style:{fontSize:10,color:C.dim,fontFamily:"var(--ff)"}},f.unit))))),
+          SCAN_FIELDS.map(f=>h(ScanField,{key:f.key,fieldDef:f,value:scanVals[f.key],onChange:v=>updateField(f.key,v)}))),
         h("div",{style:{display:"flex",gap:8}},
           h("button",{onClick:()=>setScanPhase("idle"),style:{flex:1,padding:"12px 0",borderRadius:10,border:"1px solid "+C.dimmer,background:"transparent",color:C.sub,fontSize:11,cursor:"pointer",fontFamily:"var(--ff)"}},"↩ Rescan"),
           h("button",{onClick:()=>onApply(scanVals),style:{flex:2,padding:"12px 0",borderRadius:10,border:"none",background:GP.flat,color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"var(--ff)",letterSpacing:1}},"✦ APPLY TO TUNER"))),
@@ -486,7 +546,7 @@ function TuneDetail({tune,onClose,onUpdateNotes,onDelete}){
       h("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
         h("span",{style:{fontSize:10,color:C.sub,fontFamily:"var(--ff)"}},"FD: ",h("span",{style:{color:C.gold,fontFamily:"var(--fm)"}},ge.finalDrive)),
         ge.ratios.map((r,i)=>h("span",{key:i,style:{fontSize:10,color:C.sub,fontFamily:"var(--ff)"}},(i+1)+": ",h("span",{style:{color:C.text,fontFamily:"var(--fm)"}},r)))),
-      h("div",{style:{fontSize:10,color:C.dim,marginTop:4,fontFamily:"var(--ff)"}},"Shift @ "+ge.shiftPoint+" RPM · Launch @ "+ge.launchRpm+" RPM")),
+      h("div",{style:{fontSize:10,color:C.dim,marginTop:4,fontFamily:"var(--ff)"}},"Shift @ "+ge.shiftPoint+" RPM · Launch @ "+ge.launchRpm+" RPM · ",h("span",{style:{color:ge.spreadColor,fontWeight:700}},ge.spreadLabel))),
     h("div",{style:card2},
       h("div",{style:{fontSize:9,color:C.dim,letterSpacing:2,textTransform:"uppercase",marginBottom:6,fontFamily:"var(--ff)"}},"DIFFERENTIAL"),
       h("div",{style:{display:"flex",gap:12,flexWrap:"wrap"}},
@@ -542,7 +602,7 @@ function TrendsPanel({tunes}){
       })));
 }
 
-// ── MAIN APP ─────────────────────────────────────────────────────────────────
+// ── MAIN APP ──────────────────────────────────────────────────────────────────
 function App(){
   const[inp,setInp]=useState({weightFront:52,hp:500,weightLbs:3000,drivetrain:"RWD",enginePos:"Front",tireCompound:"Race",hasAero:false,tireWidthF:245,tireWidthR:275,isController:true});
   const[dyno,setDyno]=useState({peakHpRpm:7000,peakTqRpm:5000,redline:8500,peakHp:500,peakTq:400,powerClimb:0,powerFalloff:0});
@@ -554,7 +614,7 @@ function App(){
   const[loadedTuneId,setLoadedTuneId]=useState(null);
   const[expandedTuneId,setExpandedTuneId]=useState(null);
   const[showTrends,setShowTrends]=useState(false);
-  const[showScanner,setShowScanner]=useState(false); // NEW
+  const[showScanner,setShowScanner]=useState(false);
 
   const si=(k,v)=>setInp(p=>({...p,[k]:v})),sd=(k,v)=>setDyno(p=>({...p,[k]:v}));
   const pairs={sFMn:"sRMn",sRMn:"sFMn",sFMx:"sRMx",sRMx:"sFMx",aFMn:"aRMn",aRMn:"aFMn",aFMx:"aRMx",aRMx:"aFMx",rbFMn:"rbRMn",rbRMn:"rbFMn",rbFMx:"rbRMx",rbRMx:"rbFMx",bpFMn:"bpRMn",bpRMn:"bpFMn",bpFMx:"bpRMx",bpRMx:"bpFMx"};
@@ -573,7 +633,6 @@ function App(){
   const doDel=id=>{const u=tunes.filter(t=>t.id!==id);setTunes(u);saveTunes(u);if(loadedTuneId===id)setLoadedTuneId(null);if(expandedTuneId===id)setExpandedTuneId(null)};
   const doUpdateNotes=(id,notes)=>{const u=tunes.map(t=>t.id===id?{...t,notes}:t);setTunes(u);saveTunes(u)};
 
-  // NEW: apply scanned dyno values
   const applyScannedDyno=useCallback(vals=>{
     setDyno(p=>({...p,
       peakHp:vals.peakHp||p.peakHp,
@@ -594,14 +653,13 @@ function App(){
 
   return h("div",{style:{padding:"20px 12px 60px",background:"radial-gradient(ellipse at 50% 0%,#1a0a14 0%,"+C.bg+" 60%)",minHeight:"100vh"}},
 
-    // Scanner overlay
     showScanner&&h(ScanOverlay,{onApply:applyScannedDyno,onClose:()=>setShowScanner(false)}),
 
     // Header
     h("div",{style:{textAlign:"center",marginBottom:20}},
       h("div",{style:{fontSize:10,letterSpacing:8,color:C.gold,fontFamily:"var(--ff)",fontWeight:300,marginBottom:4}},"✦ FORZA HORIZON 5 ✦"),
       h("div",{style:{fontSize:26,fontWeight:800,letterSpacing:3,textTransform:"uppercase",fontFamily:"var(--ff)",background:GP.pink,WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}},"UNIVERSAL TUNER"),
-      h("div",{style:{fontSize:9,color:C.dim,letterSpacing:4,marginTop:3,fontFamily:"var(--ff)"}},"V9.4 ✦ DYNO SCANNER"),
+      h("div",{style:{fontSize:9,color:C.dim,letterSpacing:4,marginTop:3,fontFamily:"var(--ff)"}},"V9.5 ✦ SCAN ACCURACY"),
       h("div",{style:{width:50,height:2,background:GP.gold,margin:"10px auto 0",borderRadius:1}}),
       loadedTune&&h("div",{style:{marginTop:8,fontSize:10,color:C.green,fontFamily:"var(--ff)",letterSpacing:1}},"✦ "+loadedTune.name+(loadedTune.car?" — "+loadedTune.car:"")+" ✦"),
       h("div",{style:{display:"flex",justifyContent:"center",gap:8,marginTop:loadedTune?8:12,flexWrap:"wrap"}},
@@ -642,7 +700,7 @@ function App(){
       h("div",{style:{display:"flex",gap:5,marginTop:4}},h("label",{style:{...sty.lbl,lineHeight:"28px"}},"Input"),["Controller","Wheel"].map(m=>h(Pill,{key:m,label:m,active:inp.isController===(m==="Controller"),onClick:()=>si("isController",m==="Controller"),color:m==="Controller"?GP.neon:GP.gold}))),
       h(ArchTag,{enginePos:inp.enginePos,drivetrain:inp.drivetrain,ptw:inp.hp/Math.max(inp.weightLbs,1)}))),
 
-    // Power & Gearing — with Scan button
+    // Power & Gearing
     h("div",{style:cd},h(Sec,{title:"Power & Gearing",icon:"⚡"},
       h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}},
         h("div",{style:{fontSize:10,color:C.dim,lineHeight:1.6,fontFamily:"var(--ff)",flex:1}},"Enter from in-game dyno, or scan a photo."),
@@ -654,11 +712,25 @@ function App(){
       h("div",{style:{padding:"10px 12px",background:"#0e080b",borderRadius:8,border:"1px solid "+C.dimmer,marginBottom:10}},h("div",{style:{fontSize:9,color:C.dim,letterSpacing:2,textTransform:"uppercase",marginBottom:8,fontFamily:"var(--ff)"}},"Optional — Turbo / Peaky Engines"),h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}},h(NumIn,{label:"Power Starts (RPM)",value:dyno.powerClimb||"",onChange:v=>sd("powerClimb",v)}),h(NumIn,{label:"Power Drops (RPM)",value:dyno.powerFalloff||"",onChange:v=>sd("powerFalloff",v)}))),
       h(PowerBar,{dyno}))),
 
+    // Gearing Output — with spread label
     ge&&h("div",{style:cd},h(Sec,{title:"Gearing Output",icon:"⟐"},
-      h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginBottom:14}},h("div",{style:sb},h("div",{style:sl},"Launch RPM"),h("div",{style:{fontSize:20,fontWeight:700,fontFamily:"var(--fm)",background:GP.flat,WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}},ge.launchRpm)),h("div",{style:sb},h("div",{style:sl},"Final Drive"),h("div",{style:{fontSize:20,fontWeight:700,fontFamily:"var(--fm)",color:C.gold}},ge.finalDrive)),h("div",{style:sb},h("div",{style:sl},"Top Speed"),h("div",{style:{fontSize:20,fontWeight:700,fontFamily:"var(--fm)",color:C.chrome}},ge.calcTopSpeed))),
+      h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginBottom:14}},
+        h("div",{style:sb},h("div",{style:sl},"Launch RPM"),h("div",{style:{fontSize:20,fontWeight:700,fontFamily:"var(--fm)",background:GP.flat,WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}},ge.launchRpm)),
+        h("div",{style:sb},h("div",{style:sl},"Final Drive"),h("div",{style:{fontSize:20,fontWeight:700,fontFamily:"var(--fm)",color:C.gold}},ge.finalDrive)),
+        h("div",{style:sb},h("div",{style:sl},"Top Speed"),h("div",{style:{fontSize:20,fontWeight:700,fontFamily:"var(--fm)",color:C.chrome}},ge.calcTopSpeed))),
+      // Spread label row
+      h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 10px",background:"#0e080b",borderRadius:8,marginBottom:10,border:"1px solid "+C.dimmer}},
+        h("span",{style:{fontSize:9,color:C.dim,letterSpacing:2,textTransform:"uppercase",fontFamily:"var(--ff)"}},"Gear Spread"),
+        h("div",{style:{display:"flex",alignItems:"center",gap:8}},
+          h("span",{style:{fontSize:9,color:C.dim,fontFamily:"var(--fm)"}},"K="+ge.K),
+          h("span",{style:{fontSize:11,fontWeight:700,fontFamily:"var(--ff)",color:ge.spreadColor,letterSpacing:1}},ge.spreadLabel))),
       h(Row,{label:"Final Drive",value:ge.finalDrive,extra:h(GearPos,{gear:"FD",ratio:ge.finalDrive})}),
       ge.ratios.map((r,i)=>h(Row,{key:i,label:(i+1)+(["st","nd","rd"][i]||"th"),value:r,extra:h(GearPos,{gear:i+1,ratio:r})})),
-      h("div",{style:{marginTop:10,padding:10,background:"#0e080b",borderRadius:8,fontSize:11,color:C.sub,lineHeight:1.8,fontFamily:"var(--fm)"}},h("span",{style:{fontSize:9,color:C.dim,letterSpacing:2,textTransform:"uppercase",fontFamily:"var(--ff)"}},"SHIFT AT "),h("span",{style:{color:C.pink,fontWeight:700}},ge.shiftPoint),h("span",{style:{color:C.dim}}," RPM"),ge.shiftPoints.map((sp,i)=>h("span",{key:i,style:{color:C.dim}},(i===0?" · ":"")+sp.gear+"→"+(sp.gear+1)+": ",h("span",{style:{color:C.sub}},sp.dropTo),(i<ge.shiftPoints.length-1?" · ":"")))))),
+      h("div",{style:{marginTop:10,padding:10,background:"#0e080b",borderRadius:8,fontSize:11,color:C.sub,lineHeight:1.8,fontFamily:"var(--fm)"}},
+        h("span",{style:{fontSize:9,color:C.dim,letterSpacing:2,textTransform:"uppercase",fontFamily:"var(--ff)"}},"SHIFT AT "),
+        h("span",{style:{color:C.pink,fontWeight:700}},ge.shiftPoint),
+        h("span",{style:{color:C.dim}}," RPM"),
+        ge.shiftPoints.map((sp,i)=>h("span",{key:i,style:{color:C.dim}},(i===0?" · ":"")+sp.gear+"→"+(sp.gear+1)+": ",h("span",{style:{color:C.sub}},sp.dropTo),(i<ge.shiftPoints.length-1?" · ":"")))))),
 
     h("div",{style:cd},h(Sec,{title:"Handling Balance",icon:"☯"},
       h("div",{style:{fontSize:10,color:C.dim,marginBottom:12,lineHeight:1.6,fontFamily:"var(--ff)"}},"Adjust after testing. Entry = turn-in to apex. Exit = apex to throttle."),
